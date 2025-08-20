@@ -1,22 +1,9 @@
-# Import thư viện Gemini AI
 import google.generativeai as genai
-
-# Import thư viện làm việc với hệ điều hành
 import os
-
-# Import thư viện để tải biến môi trường
 from dotenv import load_dotenv
-
-# Import FastAPI
 from fastapi import FastAPI
-
-# Import thư viện kết nối với SQL Server
 import pyodbc
-
-# Import Pydantic
 from pydantic import BaseModel
-
-# Thêm middleware CORS
 from fastapi.middleware.cors import CORSMiddleware
 
 # Tải biến môi trường
@@ -88,26 +75,25 @@ def query_database(query):
 def build_nearby_gym_query(longitude, latitude, max_distance_km=5):
     return f"""
     SELECT *
-FROM (
-    SELECT 
-        Id, GymName, Since, Address, RepresentName, TaxCode, 
-        CAST(Longitude AS FLOAT) AS Longitude,
-        CAST(Latitude AS FLOAT) AS Latitude,
-        QRCode, HotResearch, AccountId, Active, 
-        CreateAt, UpdateAt, DeleteAt, MainImage,
-        6371 * acos(
-            cos(radians(10.805765)) *
-            cos(radians(CAST(Latitude AS FLOAT))) *
-            cos(radians(CAST(Longitude AS FLOAT)) - radians(106.741796)) +
-            sin(radians(10.805765)) *
-            sin(radians(CAST(Latitude AS FLOAT)))
-        ) AS distance_km
-    FROM dbo.Gym
-    WHERE Active = 1
-) AS gyms
-WHERE gyms.distance_km <= 5
-ORDER BY gyms.distance_km ASC;
-
+    FROM (
+        SELECT 
+            Id, GymName, Since, Address, RepresentName, TaxCode, 
+            CAST(Longitude AS FLOAT) AS Longitude,
+            CAST(Latitude AS FLOAT) AS Latitude,
+            QRCode, HotResearch, AccountId, Active, 
+            CreateAt, UpdateAt, DeleteAt, MainImage,
+            6371 * acos(
+                cos(radians({latitude})) *
+                cos(radians(CAST(Latitude AS FLOAT))) *
+                cos(radians(CAST(Longitude AS FLOAT)) - radians({longitude})) +
+                sin(radians({latitude})) *
+                sin(radians(CAST(Latitude AS FLOAT)))
+            ) AS distance_km
+        FROM dbo.Gym
+        WHERE Active = 1
+    ) AS gyms
+    WHERE gyms.distance_km <= {max_distance_km}
+    ORDER BY gyms.distance_km ASC;
     """
 
 # Hàm phân loại prompt có cần query DB hay không
@@ -142,42 +128,49 @@ def classify_query(user_input):
 # Hàm xử lý chính
 def get_response(user_input, longitude=None, latitude=None):
     try:
-        # Xử lý nếu câu hỏi yêu cầu tìm gần và có tọa độ
-        if longitude and latitude and "gần" in user_input.lower():
-            sql_query = build_nearby_gym_query(longitude, latitude)
-            results = query_database(sql_query)
+        # Kiểm tra tọa độ hợp lệ
+        if longitude is not None and latitude is not None:
+            if not (-90 <= latitude <= 90) or not (-180 <= longitude <= 180):
+                return {"promptResponse": "GymRadar xin lỗi, tọa độ không hợp lệ."}
+            if "gần" in user_input.lower():
+                sql_query = build_nearby_gym_query(longitude, latitude)
+                results = query_database(sql_query)
 
-            if isinstance(results, str) or not results:
-                return {"promptResponse": "GymRadar xin lỗi, không tìm thấy phòng gym nào gần bạn."}
+                if isinstance(results, str) or not results:
+                    return {"promptResponse": "GymRadar xin lỗi, không tìm thấy phòng gym nào gần bạn."}
 
-            gyms = []
-            for row in results:
-                gyms.append({
-                    "id": str(row.Id),
-                    "gymName": row.GymName,
-                    "since": row.Since,
-                    "address": row.Address,
-                    "representName": row.RepresentName,
-                    "taxCode": row.TaxCode,
-                    "longitude": row.Longitude,
-                    "latitude": row.Latitude,
-                    "qrCode": row.QRCode,
-                    "hotResearch": row.HotResearch,
-                    "accountId": str(row.AccountId),
-                    "active": row.Active,
-                    "createAt": row.CreateAt.isoformat() if row.CreateAt else None,
-                    "updateAt": row.UpdateAt.isoformat() if row.UpdateAt else None,
-                    "deleteAt": row.DeleteAt.isoformat() if row.DeleteAt else None,
-                    "mainImage": row.MainImage,
-                    "distance_km": round(row.distance_km, 2)
-                })
+                gyms = []
+                for row in results:
+                    gyms.append({
+                        "id": str(row.Id),
+                        "gymName": row.GymName,
+                        "since": row.Since,
+                        "address": row.Address,
+                        "representName": row.RepresentName,
+                        "taxCode": row.TaxCode,
+                        "longitude": row.Longitude,
+                        "latitude": row.Latitude,
+                        "qrCode": row.QRCode,
+                        "hotResearch": row.HotResearch,
+                        "accountId": str(row.AccountId),
+                        "active": row.Active,
+                        "createAt": row.CreateAt.isoformat() if row.CreateAt else None,
+                        "updateAt": row.UpdateAt.isoformat() if row.UpdateAt else None,
+                        "deleteAt": row.DeleteAt.isoformat() if row.DeleteAt else None,
+                        "mainImage": row.MainImage,
+                        "distance_km": round(row.distance_km, 2)
+                    })
 
-            prompt_response = "GymRadar gợi ý các phòng gym gần bạn:\n" + "\n".join(
-                [f"{g['gymName']} ({g['distance_km']} km)" for g in gyms]
-            )
-            return {"gyms": gyms, "promptResponse": prompt_response}
+                prompt_response = "GymRadar gợi ý các phòng gym gần bạn:\n" + "\n".join(
+                    [f"{g['gymName']} ({g['distance_km']} km)" for g in gyms]
+                )
+                return {"gyms": gyms, "promptResponse": prompt_response}
 
-        # Nếu không, phân loại bình thường
+        # Nếu không có tọa độ nhưng yêu cầu tìm gần
+        if "gần" in user_input.lower():
+            return {"promptResponse": "Vui lòng cung cấp tọa độ (latitude, longitude) để tìm phòng gym gần bạn."}
+
+        # Phân loại và xử lý query DB
         is_db_query, sql_query = classify_query(user_input)
         if is_db_query:
             results = query_database(sql_query)
